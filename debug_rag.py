@@ -31,7 +31,7 @@ async def debug_rag_scoring():
     for i, doc in enumerate(rag.documents):
         total_score = 0
         doc_text = doc['text']
-        source = doc['source']
+        source = doc.get('metadata', {}).get('source', 'Unknown')
         
         # Simulate the scoring logic in query_stream
         

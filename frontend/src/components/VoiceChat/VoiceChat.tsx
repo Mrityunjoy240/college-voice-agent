@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
     Box,
     Button,
@@ -46,6 +46,9 @@ const VoiceChat: React.FC = () => {
     const [health, setHealth] = useState<{ status: string; groq_connected: boolean; document_count: number } | null>(null);
     const [feedbackType, setFeedbackType] = useState<'up' | 'down' | null>(null);
     const [vadActive, setVadActive] = useState(false);
+    
+    // Add session ID state
+    const [sessionId, setSessionId] = useState<string | null>(null);
 
     // Language options
     const languages = [
@@ -56,7 +59,6 @@ const VoiceChat: React.FC = () => {
     ];
 
     const voice = useVoice({ language: selectedLanguage });
-    const audioRef = useRef<HTMLAudioElement | null>(null);
     const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
     const micStreamRef = useRef<MediaStream | null>(null);
     const vadCtxRef = useRef<AudioContext | null>(null);
@@ -198,415 +200,181 @@ const VoiceChat: React.FC = () => {
             
             if (preferredVoice) {
                 setSelectedVoice(preferredVoice.name);
-            } else if (filteredVoices.length > 0) {
-                setSelectedVoice(filteredVoices[0].name);
             }
         };
-
+        
+        // Load voices initially
         loadVoices();
+        
+        // Some browsers load voices asynchronously
         window.speechSynthesis.onvoiceschanged = loadVoices;
     }, [selectedLanguage]);
 
-    // Format text for natural speech
-    const formatTextForSpeech = (text: string): string => {
-        let formatted = text;
-
-        // 1. Expand common college acronyms (Pronunciation Dictionary)
-        const pronunciationMap: { [key: string]: string } = {
-            "AI/ML": "Artificial Intelligence and Machine Learning",
-            "AIML": "Artificial Intelligence and Machine Learning",
-            "CSE": "Computer Science Engineering",
-            "ECE": "Electronics and Communication Engineering",
-            "IT": "I T",
-            "B.Tech": "B Tech",
-            "BTech": "B Tech",
-            "M.Tech": "M Tech",
-            "MTech": "M Tech",
-            "MCA": "Master of Computer Applications",
-            "BCA": "Bachelor of Computer Applications",
-            "HOD": "Head of Department",
-            "Dr.": "Doctor",
-            "Prof.": "Professor",
-            "Dept.": "Department",
-            "Lab": "Laboratory",
-            "Govt.": "Government",
-            "Pvt.": "Private",
-            "Ltd.": "Limited",
-            "Estt.": "Establishment",
-            "w.e.f": "with effect from",
-            "viz.": "namely",
-            "etc.": "et cetera",
-            "No.": "Number",
-            "BCREC": "B C R E C",
-            "MAKAUT": "Mack-out",
-            "WB": "West Bengal",
-            "sem": "semester",
-            "yr": "year",
-            "mgmt": "management",
-            "engg": "engineering"
-        };
-
-        const caseSensitiveKeys = new Set(["IT"]);
-
-        // Replace acronyms (word-bounded)
-        Object.entries(pronunciationMap).forEach(([acronym, replacement]) => {
-            // Escape special regex chars in acronym
-            const escaped = acronym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const flags = caseSensitiveKeys.has(acronym) ? 'g' : 'gi';
-            const regex = new RegExp(`\\b${escaped}\\b`, flags);
-            formatted = formatted.replace(regex, replacement);
-            
-            // Handle slash cases specially if not covered (like AI/ML)
-            if (acronym.includes('/')) {
-                const slashRegex = new RegExp(escaped.replace('/', '\\/'), flags);
-                formatted = formatted.replace(slashRegex, replacement);
-            }
-        });
-
-        // Convert Indian number format (₹1,20,000) to words
-        formatted = formatted.replace(/₹(\d{1,2}),(\d{2}),(\d{3})/g, (match, lakh, thousand, hundred) => {
-            void match;
-            const total = parseInt(lakh) * 100000 + parseInt(thousand) * 1000 + parseInt(hundred);
-            return `${numberToWords(total)} rupees`;
-        });
-
-        // Convert regular currency (₹48,000)
-        formatted = formatted.replace(/₹([\d,]+)/g, (match, num) => {
-            void match;
-            const number = parseInt(num.replace(/,/g, ''));
-            return `${numberToWords(number)} rupees`;
-        });
-
-        // Convert standalone numbers with commas (1,20,000)
-        formatted = formatted.replace(/\b(\d{1,2}),(\d{2}),(\d{3})\b/g, (match, lakh, thousand, hundred) => {
-            void match;
-            const total = parseInt(lakh) * 100000 + parseInt(thousand) * 1000 + parseInt(hundred);
-            return numberToWords(total);
-        });
-
-        // Convert regular numbers with commas (48,000)
-        formatted = formatted.replace(/\b([\d,]+)\b/g, (match, num) => {
-            void match;
-            if (num.includes(',')) {
-                const number = parseInt(num.replace(/,/g, ''));
-                if (number > 999) {
-                    return numberToWords(number);
-                }
-            }
-            return num;
-        });
-
-        // Convert percentages (85%)
-        formatted = formatted.replace(/(\d+)%/g, (match, num) => { void match; return `${num} percent`; });
-
-        // Convert phone numbers to be spoken digit by digit
-        formatted = formatted.replace(/\b(\d{3})-(\d{4})-(\d{4})\b/g, (match, p1, p2, p3) => {
-            void match;
-            return `${p1.split('').join(' ')}, ${p2.split('').join(' ')}, ${p3.split('').join(' ')}`;
-        });
-
-        // Improve punctuation for natural pauses
-        formatted = formatted.replace(/\. /g, '. ... ');
-        formatted = formatted.replace(/\? /g, '? ... ');
-        formatted = formatted.replace(/: /g, ': .. ');
-
-        return formatted;
-    };
-
-    // Convert numbers to words
-    const numberToWords = (num: number): string => {
-        if (num === 0) return 'zero';
-
-        const ones = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
-        const tens = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
-        const teens = ['ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
-
-        const convertLessThanThousand = (n: number): string => {
-            if (n === 0) return '';
-            if (n < 10) return ones[n];
-            if (n < 20) return teens[n - 10];
-            if (n < 100) return tens[Math.floor(n / 10)] + (n % 10 !== 0 ? ' ' + ones[n % 10] : '');
-            return ones[Math.floor(n / 100)] + ' hundred' + (n % 100 !== 0 ? ' and ' + convertLessThanThousand(n % 100) : '');
-        };
-
-        if (num < 1000) return convertLessThanThousand(num);
-
-        // Indian numbering system
-        if (num >= 10000000) { // Crores
-            const crores = Math.floor(num / 10000000);
-            const remainder = num % 10000000;
-            return convertLessThanThousand(crores) + ' crore' + (remainder !== 0 ? ' ' + numberToWords(remainder) : '');
-        }
-        if (num >= 100000) { // Lakhs
-            const lakhs = Math.floor(num / 100000);
-            const remainder = num % 100000;
-            return convertLessThanThousand(lakhs) + ' lakh' + (remainder !== 0 ? ' ' + numberToWords(remainder) : '');
-        }
-        if (num >= 1000) { // Thousands
-            const thousands = Math.floor(num / 1000);
-            const remainder = num % 1000;
-            return convertLessThanThousand(thousands) + ' thousand' + (remainder !== 0 ? ' ' + numberToWords(remainder) : '');
-        }
-
-        return convertLessThanThousand(num);
-    };
-
-    // Speak answer using Web Speech Synthesis
-    const speakAnswer = async (text: string) => {
-        // Cancel any ongoing speech
-        stopSpeaking();
-
-        const langPrefix = selectedLanguage.split('-')[0];
-
-        // Use Server-Side TTS for Bengali (Murf.ai)
-        if (langPrefix === 'bn') {
-            try {
-                setIsSpeaking(true);
-                const voiceId = 'bn-IN-ishani'; // High quality Bengali voice
-                
-                const response = await fetch(`${API_BASE}/qa/tts`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ 
-                        text: text,
-                        voice_id: voiceId
-                    })
-                });
-
-                if (!response.ok) throw new Error('TTS failed');
-
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const audio = new Audio(url);
-                
-                audio.onended = () => {
-                    setIsSpeaking(false);
-                    URL.revokeObjectURL(url);
-                };
-                audio.onerror = () => {
-                    setIsSpeaking(false);
-                    console.error("Audio playback error");
-                };
-
-                audioRef.current = audio;
-                await audio.play();
-                return; // Skip browser TTS
-            } catch (e) {
-                console.error("Server TTS failed, falling back to browser", e);
-                // Fallback to browser TTS
-            }
-        }
-
-        // Format text for natural speech
-        const formattedText = formatTextForSpeech(text);
-
-        const utterance = new SpeechSynthesisUtterance(formattedText);
+    // Function to speak text
+    const speakAnswer = useCallback((text: string) => {
+        if (!text.trim()) return;
         
-        // Use selected voice
-        const voiceObj = availableVoices.find(v => v.name === selectedVoice);
-        if (voiceObj) {
-            utterance.voice = voiceObj;
+        // Cancel any ongoing speech
+        if (utteranceRef.current) {
+            window.speechSynthesis.cancel();
         }
-
-        // Set language based on selected language
+        
+        const utterance = new SpeechSynthesisUtterance(text);
+        utteranceRef.current = utterance;
+        
+        // Set voice if selected
+        if (selectedVoice) {
+            const voice = availableVoices.find(v => v.name === selectedVoice);
+            if (voice) {
+                utterance.voice = voice;
+            }
+        }
+        
+        // Set language
         utterance.lang = selectedLanguage;
         
-        // Adjust speech parameters based on language for better quality
-        if (langPrefix === 'bn') {
-            // Bengali: Slower rate and slightly lower pitch for better clarity
-            utterance.rate = 0.85;    // Slower for clearer pronunciation
-            utterance.pitch = 0.95;    // Slightly lower pitch
-            utterance.volume = 1.0;
-        } else if (langPrefix === 'hi') {
-            // Hindi: Good settings (user said it's good)
-            utterance.rate = 0.9;
-            utterance.pitch = 1.0;
-            utterance.volume = 1.0;
-        } else {
-            // English and others
-            utterance.rate = 0.9;     // Slightly slower for clarity
-            utterance.pitch = 1.0;    // Natural pitch
-            utterance.volume = 1.0;   // Full volume
-        }
-
-        utterance.onstart = () => setIsSpeaking(true);
-        utterance.onend = () => setIsSpeaking(false);
-        utterance.onerror = () => setIsSpeaking(false);
-
-        utteranceRef.current = utterance;
+        // Set speaking state
+        setIsSpeaking(true);
+        
+        utterance.onend = () => {
+            setIsSpeaking(false);
+            utteranceRef.current = null;
+        };
+        
+        utterance.onerror = (event) => {
+            console.error('Speech synthesis error:', event);
+            setIsSpeaking(false);
+            utteranceRef.current = null;
+        };
+        
         window.speechSynthesis.speak(utterance);
-    };
+    }, [selectedVoice, availableVoices, selectedLanguage]);
 
-    // Stop speaking
-    const stopSpeaking = () => {
-        window.speechSynthesis.cancel();
-        setIsSpeaking(false);
-    };
-
-    // Handle voice recording
-    useEffect(() => {
-        if (voice.transcript && !isRecording) {
-            // User finished speaking, send query
-            handleVoiceQuery(voice.transcript);
+    // Function to stop speaking
+    const stopSpeaking = useCallback(() => {
+        if (utteranceRef.current) {
+            window.speechSynthesis.cancel();
+            setIsSpeaking(false);
+            utteranceRef.current = null;
         }
-    }, [voice.transcript, isRecording]); // eslint-disable-line react-hooks/exhaustive-deps
-    useEffect(() => {
-        if (isSpeaking && voice.interimTranscript && voice.interimTranscript.length > 0) {
-            stopSpeaking();
-        }
-    }, [isSpeaking, voice.interimTranscript]);
-    useEffect(() => {
-        if (isSpeaking && vadActive) {
-            stopSpeaking();
-        }
-    }, [isSpeaking, vadActive]);
+    }, []);
 
-    const handleVoiceQuery = async (query: string) => {
-        if (!query.trim()) return;
-
-        setIsProcessing(true);
-        setAnswer('');
-
-        try {
-            const response = await fetch(`${API_BASE}/qa/query`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ message: query }),
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-
-            const data = await response.json();
-            const lang = (data.language as string) || detectLanguage(query);
-            setSelectedLanguage(lang);
-            setAnswer(data.answer);
-
-            // Speak the answer
-            speakAnswer(data.answer);
-        } catch (error) {
-            console.error('Query error:', error);
-            const errorMsg = 'Sorry, I encountered an error processing your question.';
-            setAnswer(errorMsg);
-            speakAnswer(errorMsg);
-        } finally {
-            setIsProcessing(false);
-        }
-    };
-
+    // Function to start recording
     const startRecording = async () => {
-        stopSpeaking();
+        if (isProcessing) return;
+        
         try {
-            await voice.startListening();
             setIsRecording(true);
-            setIsProcessing(false);
-            setAnswer('');
-            
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true
-                    }
-                });
-                
-                micStreamRef.current = stream;
-                const processed = noiseCanceller.processAudio(stream) || stream;
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const Ctor: any = (window as any).AudioContext || (window as any).webkitAudioContext;
-                const ctx: AudioContext = new Ctor();
-                vadCtxRef.current = ctx;
-                const src = ctx.createMediaStreamSource(processed);
-                const analyser = ctx.createAnalyser();
-                analyser.fftSize = 512;
-                vadAnalyserRef.current = analyser;
-                src.connect(analyser);
-                const buf = new Float32Array(analyser.fftSize);
-                if (vadTimerRef.current) {
-                    clearInterval(vadTimerRef.current);
-                }
-                vadTimerRef.current = setInterval(() => {
-                    if (!vadAnalyserRef.current) return;
-                    vadAnalyserRef.current.getFloatTimeDomainData(buf);
-                    let rms = 0;
-                    for (let i = 0; i < buf.length; i++) {
-                        rms += buf[i] * buf[i];
-                    }
-                    rms = Math.sqrt(rms / buf.length);
-                    setVadActive(rms > 0.02);
-                }, 50);
-            } catch (err) {
-                console.error("Error accessing microphone for VAD:", err);
-                // We don't stop recording here because SpeechRecognition might still work
-                // or it might be the one that failed if permissions were globally denied.
-            }
-        } catch (e) {
-            console.error("Failed to start voice recognition:", e);
+            await voice.startRecording();
+        } catch (error) {
+            console.error('Error starting recording:', error);
             setIsRecording(false);
         }
     };
 
+    // Function to stop recording
     const stopRecording = () => {
-        voice.stopListening();
         setIsRecording(false);
-        setIsProcessing(true); // Start processing after recording stops
-        setVadActive(false);
-        if (vadTimerRef.current) {
-            clearInterval(vadTimerRef.current);
-            vadTimerRef.current = null;
-        }
-        if (vadCtxRef.current) {
-            vadCtxRef.current.close();
-            vadCtxRef.current = null;
-        }
-        if (micStreamRef.current) {
-            micStreamRef.current.getTracks().forEach(track => track.stop());
-            micStreamRef.current = null;
-        }
-        noiseCanceller.cleanup();
+        voice.stopRecording();
     };
 
+    // Handle text query
     const handleTextQuery = async () => {
-        if (!textInput.trim()) return;
-
-        stopSpeaking(); // Stop any ongoing speech
+        if (!textInput.trim() || isProcessing) return;
+        
         setIsProcessing(true);
         setAnswer('');
-
+        
         try {
-            const response = await fetch(`${API_BASE}/qa/query`, {
+            const res = await fetch(`${API_BASE}/qa/query`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({ message: textInput }),
             });
-
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
+            
+            if (res.ok) {
+                const data = await res.json();
+                setAnswer(data.answer);
+            } else {
+                setAnswer('Error: Could not process your request. Please try again.');
             }
-
-            const data = await response.json();
-            const lang = (data.language as string) || detectLanguage(textInput);
-            setSelectedLanguage(lang);
-            setAnswer(data.answer);
-
-            // Speak the answer
-            speakAnswer(data.answer);
-            setTextInput(''); // Clear input
         } catch (error) {
-            console.error('Query error:', error);
-            const errorMsg = 'Sorry, I encountered an error processing your question.';
-            setAnswer(errorMsg);
-            speakAnswer(errorMsg);
+            console.error('Error processing query:', error);
+            setAnswer('Error: Could not process your request. Please try again.');
         } finally {
             setIsProcessing(false);
+            setTextInput('');
         }
     };
+
+    // WebSocket connection for voice interaction
+    useEffect(() => {
+        let ws: WebSocket | null = null;
+        
+        // Function to initialize WebSocket connection
+        const initWebSocket = () => {
+            // Clean up any existing connection
+            if (ws) {
+                ws.close();
+            }
+            
+            // Create new WebSocket connection
+            const wsUrl = `${API_BASE.replace('http', 'ws')}/voice`;
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                console.log('Connected to voice WebSocket');
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === 'ready') {
+                        console.log('Voice agent ready');
+                        if (data.session_id) {
+                            setSessionId(data.session_id);
+                        }
+                    } else if (data.type === 'transcript') {
+                        setAnswer(data.text);
+                    } else if (data.type === 'answer_chunk') {
+                        setAnswer(prev => prev ? prev + data.text : data.text);
+                    } else if (data.type === 'answer') {
+                        setAnswer(data.text);
+                        if (data.session_id) {
+                            setSessionId(data.session_id);
+                        }
+                        // Don't speak automatically - user controls playback
+                    } else if (data.type === 'error') {
+                        console.error('WebSocket error:', data.message);
+                    }
+                } catch (error) {
+                    console.error('Error parsing WebSocket message:', error);
+                }
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+            
+            return ws;
+        };
+        
+        // Initialize WebSocket on component mount
+        const websocket = initWebSocket();
+        
+        return () => {
+            if (websocket) {
+                websocket.close();
+            }
+        };
+    }, [API_BASE, speakAnswer]);
 
     return (
         <Container maxWidth="md" sx={{ py: 4, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
@@ -754,82 +522,59 @@ const VoiceChat: React.FC = () => {
                     </Box>
                 )}
 
-                {/* Answer Area */}
+                {/* Answer Display */}
                 {answer && (
-                    <Box sx={{ mt: 4, textAlign: 'left', p: 3, bgcolor: '#f0f4ff', borderRadius: 2, border: '1px solid #e0e7ff' }}>
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
-                            <Typography variant="h6" sx={{ color: '#1a237e', fontWeight: 600 }}>
-                                Answer:
-                            </Typography>
-                            <Box>
-                                {isSpeaking ? (
-                                    <Button size="small" color="error" onClick={stopSpeaking}>Stop Speaking</Button>
-                                ) : (
-                                    <Button size="small" color="primary" onClick={() => speakAnswer(answer)}>🔊 Replay</Button>
-                                )}
-                            </Box>
-                        </Box>
-                        <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', mb: 2 }}>
+                    <Paper 
+                        elevation={0} 
+                        sx={{ 
+                            p: 3, 
+                            bgcolor: '#f9f9f9', 
+                            borderRadius: 3, 
+                            mt: 2,
+                            textAlign: 'left'
+                        }}
+                    >
+                        <Typography variant="h6" sx={{ mb: 1, color: '#1a237e' }}>
+                            Answer:
+                        </Typography>
+                        <Typography variant="body1">
                             {answer}
                         </Typography>
-
-                        <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid #e0e0e0', display: 'flex', justifyContent: 'flex-end', gap: 1 }}>
-                             <Button
+                        
+                        {/* Replay Button */}
+                        <Box sx={{ mt: 2, textAlign: 'right' }}>
+                            <Button 
+                                variant="outlined" 
                                 size="small"
-                                variant={feedbackType === 'up' ? 'contained' : 'text'}
-                                color="success"
-                                onClick={() => { setFeedbackType('up'); }}
+                                onClick={() => speakAnswer(answer)}
+                                disabled={isSpeaking}
+                                startIcon={<VolumeUp />}
                             >
-                                👍 Helpful
-                            </Button>
-                            <Button
-                                size="small"
-                                variant={feedbackType === 'down' ? 'contained' : 'text'}
-                                color="error"
-                                onClick={() => { setFeedbackType('down'); }}
-                            >
-                                👎 Not Helpful
+                                {isSpeaking ? 'Speaking...' : 'Replay Answer'}
                             </Button>
                         </Box>
-                    </Box>
+                    </Paper>
                 )}
 
-                {/* How to use */}
-                <Box sx={{ mt: 6, p: 4, bgcolor: '#f8f9fa', borderRadius: 3, textAlign: 'left', border: '1px solid #e0e0e0' }}>
-                    <Typography variant="h6" sx={{ mb: 3, fontFamily: '"Times New Roman", Times, serif', fontWeight: 'bold', color: '#333' }}>
-                        How to use:
-                    </Typography>
-                    <Stack spacing={2}>
-                        {[
-                            "Click the microphone button and speak your question",
-                            "Or type your question in the text box",
-                            "Get instant answers with natural audio responses! 🔊",
-                            "Select your preferred voice from the dropdown above"
-                        ].map((step, index) => (
-                            <Box key={index} sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                                <Box sx={{
-                                    width: 24,
-                                    height: 24,
-                                    borderRadius: '50%',
-                                    bgcolor: '#e0e7ff',
-                                    color: '#1a237e',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    fontWeight: 'bold',
-                                    fontSize: '0.8rem',
-                                    flexShrink: 0
-                                }}>
-                                    {index + 1}
-                                </Box>
-                                <Typography variant="body2" color="text.secondary">
-                                    {step}
-                                </Typography>
-                            </Box>
-                        ))}
-                    </Stack>
-                </Box>
-
+                {/* Feedback Buttons */}
+                {answer && (
+                    <Box sx={{ mt: 3, display: 'flex', justifyContent: 'center', gap: 2 }}>
+                        <Button
+                            variant={feedbackType === 'up' ? 'contained' : 'outlined'}
+                            color="success"
+                            onClick={() => setFeedbackType('up')}
+                        >
+                            👍 Helpful
+                        </Button>
+                        <Button
+                            variant={feedbackType === 'down' ? 'contained' : 'outlined'}
+                            color="error"
+                            onClick={() => setFeedbackType('down')}
+                        >
+                            👎 Not Helpful
+                        </Button>
+                    </Box>
+                )}
             </Paper>
         </Container>
     );

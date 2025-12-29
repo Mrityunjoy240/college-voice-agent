@@ -1,87 +1,74 @@
-import requests
-from app.config import settings
-from typing import Optional
-import asyncio
+import logging
+import io
+import re
+
+from gtts import gTTS
+
+class TTSAPIError(Exception):
+    """Exception raised for TTS API errors"""
+    pass
+
+logger = logging.getLogger(__name__)
 
 class TTSService:
-    """Text-to-Speech service using MURF.ai."""
-    
     def __init__(self):
-        self.api_key = settings.murf_api_key
-        self.voice_id = settings.murf_voice_id
-        self.api_url = "https://api.murf.ai/v1/speech/generate"
+        """Initialize TTS service using gTTS"""
+        logger.info("TTS service initialized with gTTS")
     
-    async def synthesize_async(self, text: str, voice_id: Optional[str] = None) -> bytes:
+    async def text_to_speech(self, text: str, voice_id=None) -> bytes:
         """
-        Async version of synthesize.
+        Convert text to speech using gTTS (Google Text-to-Speech)
         """
-        return await asyncio.to_thread(self.synthesize, text, voice_id)
+        # Process text to expand acronyms for better pronunciation
+        processed_text = self._expand_acronyms(text)
+        
+        return self._generate_gtts(processed_text)
+    
+    def _expand_acronyms(self, text: str) -> str:
+        """
+        Expand acronyms and fix symbols in text for better pronunciation
+        """
+        # Replace rupee symbol with word for proper pronunciation
+        processed_text = text.replace('₹', 'rupees ')
+        
+        # Define acronyms to expand with spaces for letter-by-letter pronunciation
+        acronyms = {
+            r'\bIT\b': 'I T',
+            r'\bCSE\b': 'C S E',
+            r'\bAIML\b': 'A I M L',
+            r'\bECE\b': 'E C E',
+            r'\bEE\b': 'E E',
+            r'\bME\b': 'M E',
+            r'\bCE\b': 'C E',
+            r'\bCS\b': 'C S',
+            r'\bDS\b': 'D S',
+            r'\bCSD\b': 'C S D',
+            r'\bBTech\b': 'B Tech',
+            r'\bB\.Tech\b': 'B Tech',
+            r'\bMTech\b': 'M Tech',
+            r'\bM\.Tech\b': 'M Tech'
+        }
+        
+        for pattern, replacement in acronyms.items():
+            processed_text = re.sub(pattern, replacement, processed_text, flags=re.IGNORECASE)
+        
+        return processed_text
 
-    def synthesize(self, text: str, voice_id: Optional[str] = None) -> bytes:
+    def _generate_gtts(self, text: str) -> bytes:
         """
-        Synthesize text to speech using MURF.ai.
-        Returns audio bytes (MP3 format).
+        Generate TTS using Google Text-to-Speech
         """
-        if not text.strip():
-            raise ValueError("Text cannot be empty")
-        
-        # Use provided voice_id or default
-        selected_voice = voice_id or self.voice_id
-        
-        # Prepare request
-        headers = {
-            "api-key": self.api_key,
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "voiceId": selected_voice,
-            "text": text,
-            "format": "mp3",
-            "sampleRate": 24000,
-            "speed": 1.0,
-            "pitch": 1.0
-        }
-        
         try:
-            response = requests.post(
-                self.api_url,
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
+            # Create gTTS object with Indian English accent
+            tts = gTTS(text=text, lang='en', tld='co.in', slow=False)
             
-            if response.status_code == 200:
-                return response.content
-            else:
-                # Return error message as fallback
-                error_msg = f"TTS Error: {response.status_code} - {response.text}"
-                print(error_msg)
-                # For development without API key, return empty bytes
-                return b""
-        
-        except requests.exceptions.RequestException as e:
-            print(f"TTS Request error: {str(e)}")
-            # For development without API key, return empty bytes
-            return b""
-    
-    def get_available_voices(self) -> list:
-        """Get list of available MURF.ai voices."""
-        headers = {
-            "api-key": self.api_key,
-        }
-        
-        try:
-            response = requests.get(
-                "https://api.murf.ai/v1/speech/voices",
-                headers=headers,
-                timeout=10
-            )
+            # Save to bytes buffer
+            buffer = io.BytesIO()
+            tts.write_to_fp(buffer)
+            buffer.seek(0)
             
-            if response.status_code == 200:
-                return response.json()
-            else:
-                return []
-        
-        except requests.exceptions.RequestException:
-            return []
+            logger.info(f"Successfully generated TTS for text: {text[:50]}...")
+            return buffer.getvalue()
+        except Exception as e:
+            logger.error(f"Error in gTTS generation: {e}")
+            raise TTSAPIError(f"TTS generation failed: {e}")

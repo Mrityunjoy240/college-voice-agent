@@ -1,43 +1,43 @@
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import List, Optional
 import os
+from groq import Groq
 
 class Settings(BaseSettings):
-    # Groq API Configuration (NEW - super fast!)
-    groq_api_key: str = ""
+    # API Keys
+    groq_api_key: str = os.getenv("GROQ_API_KEY", "")
+    elevenlabs_api_key: str = os.getenv("ELEVENLABS_API_KEY", "")
+    speechmatics_api_key: str = os.getenv("SPEECHMATICS_API_KEY", "")
     
-    # Speechmatics Configuration
-    speechmatics_api_key: str = ""
+    # Default voice ID for ElevenLabs (Rachel's voice)
+    elevenlabs_voice_id: str = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
     
-    # MURF.ai Configuration
-    murf_api_key: str = ""
-    murf_voice_id: str = "en-US-JennyNeural"
+    # Direct Groq client initialization
+    groq_client: Optional[Groq] = None
     
-    # Chroma DB Configuration
-    chroma_host: str = "localhost"
-    chroma_port: int = 8001
+    # Directories
+    chroma_persist_dir: str = os.getenv("CHROMA_PERSIST_DIR", "chroma_db")
+    upload_dir: str = os.getenv("UPLOAD_DIR", "uploads")
+    temp_audio_dir: str = os.getenv("TEMP_AUDIO_DIR", "temp_audio")
     
-    # Application Configuration
-    upload_dir: str = "./uploads"
-    chroma_persist_dir: str = "./chroma_db"
+    # CORS settings
+    cors_origins: List[str] = ["*"]  # In production, specify exact origins
+    
+    # College information
+    college_name: str = os.getenv("COLLEGE_NAME", "Dr. B.C. Roy Engineering College")
+    admissions_phone: str = os.getenv("ADMISSIONS_PHONE", "+91-343-2567890")
+    support_email: str = os.getenv("SUPPORT_EMAIL", "admissions@bcrec.ac.in")
     
     class Config:
         env_file = ".env"
-        case_sensitive = False
-        extra = "ignore"  # Ignore extra fields from .env
-    
-    @property
-    def cors_origins(self) -> List[str]:
-        """Get CORS origins."""
-        return [
-            "http://localhost:5173",
-            "http://localhost:5174",
-            "http://localhost:5175",
-            "http://localhost:3000"
-        ]
+        extra = "ignore"
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        
+        # Initialize Groq client if API key is available
+        if self.groq_api_key:
+            self.groq_client = Groq(api_key=self.groq_api_key)
+
+# Create settings instance
 settings = Settings()
-
-# Create necessary directories
-os.makedirs(settings.upload_dir, exist_ok=True)
-os.makedirs(settings.chroma_persist_dir, exist_ok=True)
