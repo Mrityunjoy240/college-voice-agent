@@ -38,8 +38,18 @@ class TTSRequest(BaseModel):
 
 @router.post("/query", response_model=QueryResponse)
 async def query_endpoint(request: QueryRequest):
-    """Handle text-based queries"""
+    """Handle text-based queries with response caching"""
     try:
+        # Check cache first for instant response
+        cached_answer = rag_service.response_cache.get(request.message)
+        if cached_answer:
+            logger.info(f"Returning cached response for: {request.message[:50]}...")
+            return QueryResponse(
+                answer=cached_answer,
+                sources=[],
+                session_id=request.session_id or "default"
+            )
+        
         # Set clients for RAG service if not already set
         college_config = {
             'name': settings.college_name,
@@ -55,6 +65,9 @@ async def query_endpoint(request: QueryRequest):
                 answer = result.get("answer", f"I don't have that information. Please contact {settings.college_name} Admissions at {settings.admissions_phone}")
                 sources = [doc["document"] for doc in result.get("documents", [])[:3]]  # Top 3
                 session_id = request.session_id or "default"
+                
+                # Cache the response for future queries
+                rag_service.response_cache.set(request.message, answer)
                 
                 return QueryResponse(
                     answer=answer,

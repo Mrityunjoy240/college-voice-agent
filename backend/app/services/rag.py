@@ -25,12 +25,12 @@ class HybridRetriever:
     Handles both keyword-based and paraphrased queries effectively.
     """
     
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = "paraphrase-MiniLM-L3-v2"):
         """
         Initialize the hybrid retriever.
         
         Args:
-            model_name: SentenceTransformer model (lightweight, ~33MB)
+            model_name: SentenceTransformer model (paraphrase-MiniLM-L3-v2 ~17MB, 2x faster)
         """
         self.encoder = SentenceTransformer(model_name)
         self.bm25 = None
@@ -361,12 +361,103 @@ class QueryAnalytics:
 
 
 # ============================================================================
-# 5. MAIN RAG SERVICE - Integration of All Components
+# 5. RESPONSE CACHE - Fast Response Caching with TTL
+# ============================================================================
+
+class ResponseCache:
+    """
+    Cache LLM responses to avoid redundant API calls.
+    Uses MD5 hashing for query normalization and LRU eviction.
+    """
+    
+    def __init__(self, max_size: int = 100, ttl_seconds: int = 3600):
+        """
+        Args:
+            max_size: Maximum number of cached responses
+            ttl_seconds: Time-to-live for cached responses (default: 1 hour)
+        """
+        self.cache = {}  # {query_hash: (answer, timestamp, original_query)}
+        self.max_size = max_size
+        self.ttl_seconds = ttl_seconds
+        logger.info(f"ResponseCache initialized (max_size={max_size}, ttl={ttl_seconds}s)")
+    
+    def _hash_query(self, query: str) -> str:
+        """Normalize and hash query for cache key"""
+        import hashlib
+        normalized = query.lower().strip()
+        return hashlib.md5(normalized.encode()).hexdigest()
+    
+    def get(self, query: str) -> Optional[str]:
+        """
+        Get cached response if available and not expired.
+        
+        Args:
+            query: User query
+            
+        Returns:
+            Cached answer or None if not found/expired
+        """
+        query_hash = self._hash_query(query)
+        
+        if query_hash in self.cache:
+            answer, timestamp, original_query = self.cache[query_hash]
+            
+            # Check if cache entry is still valid
+            if time.time() - timestamp < self.ttl_seconds:
+                logger.info(f"Cache HIT for query: '{query}' (cached: '{original_query}')")
+                return answer
+            else:
+                # Expired, remove from cache
+                logger.info(f"Cache EXPIRED for query: '{query}'")
+                del self.cache[query_hash]
+        
+        logger.info(f"Cache MISS for query: '{query}'")
+        return None
+    
+    def set(self, query: str, answer: str) -> None:
+        """
+        Cache a response with current timestamp.
+        
+        Args:
+            query: User query
+            answer: LLM-generated answer
+        """
+        query_hash = self._hash_query(query)
+        
+        # LRU eviction if cache is full
+        if len(self.cache) >= self.max_size and query_hash not in self.cache:
+            # Find oldest entry
+            oldest_hash = min(
+                self.cache.items(), 
+                key=lambda x: x[1][1]  # Sort by timestamp
+            )[0]
+            logger.info(f"Cache FULL, evicting oldest entry")
+            del self.cache[oldest_hash]
+        
+        self.cache[query_hash] = (answer, time.time(), query)
+        logger.info(f"Cache SET for query: '{query}' (cache size: {len(self.cache)})")
+    
+    def clear(self) -> None:
+        """Clear all cached responses"""
+        self.cache.clear()
+        logger.info("Cache cleared")
+    
+    def get_stats(self) -> Dict:
+        """Get cache statistics"""
+        return {
+            'size': len(self.cache),
+            'max_size': self.max_size,
+            'ttl_seconds': self.ttl_seconds
+        }
+
+
+# ============================================================================
+# 6. MAIN RAG SERVICE - Integration of All Components
 # ============================================================================
 
 class RAGService:
     """
-    Main RAG service integrating hybrid retrieval, query expansion, and analytics.
+    Main RAG service integrating hybrid retrieval, query expansion, analytics, and caching.
     """
     
     def __init__(self):
@@ -374,6 +465,7 @@ class RAGService:
         self.query_expander = None  # Will be set after initialization
         self.system_prompt_builder = None  # Will be set after initialization
         self.analytics = QueryAnalytics()
+        self.response_cache = ResponseCache(max_size=100, ttl_seconds=3600)  # 1 hour TTL
         
         # Load documents from JSON file
         self.documents = self._load_documents()
