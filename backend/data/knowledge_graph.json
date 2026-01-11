@@ -1,0 +1,51 @@
+{
+  "courses": [
+    {
+      "Department": "Computer Science",
+      "Course Name": "B.Tech in CSE",
+      "Duration": "4 Years",
+      "Intake": "180",
+      "HOD": "Dr. A. Kumar"
+    },
+    {
+      "Department": "Computer Science",
+      "Course Name": "B.Tech in AI & ML",
+      "Duration": "4 Years",
+      "Intake": "60",
+      "HOD": "Dr. S. Roy"
+    },
+    {
+      "Department": "Electronics",
+      "Course Name": "B.Tech in ECE",
+      "Duration": "4 Years",
+      "Intake": "120",
+      "HOD": "Dr. B. Das"
+    },
+    {
+      "Department": "Mechanical",
+      "Course Name": "B.Tech in ME",
+      "Duration": "4 Years",
+      "Intake": "60",
+      "HOD": "Dr. C. Bose"
+    },
+    {
+      "Department": "Civil",
+      "Course Name": "B.Tech in CE",
+      "Duration": "4 Years",
+      "Intake": "60",
+      "HOD": "Dr. D. Gupta"
+    },
+    {
+      "Department": "Management",
+      "Course Name": "MBA",
+      "Duration": "2 Years",
+      "Intake": "60",
+      "HOD": "Dr. E. Sen"
+    }
+  ],
+  "fees_raw": "\nDr. B.C. Roy Engineering College - Fee Structure (2025-26)\n\nB.Tech Programs:\n- Admission Fee (One time): \u20b910,000\n- Tuition Fee (Per Semester): \u20b945,000\n- Development Fee (Per Semester): \u20b95,000\n- Library Fee (Per Semester): \u20b91,000\n- Total Semester Fee: \u20b951,000\n\nM.Tech Programs:\n- Admission Fee (One time): \u20b915,000\n- Tuition Fee (Per Semester): \u20b960,000\n- Total Semester Fee: \u20b960,000 (Scholarships available for GATE qualified)\n\nHostel Fees:\n- Boarding & Lodging (Per Semester): \u20b935,000\n- Mess Charges (Per Month): \u20b94,000 (approx)\n\nPayment Modes:\n- Online via College Portal\n- Demand Draft in favor of \"BCREC\" payable at Durgapur\n",
+  "meta": {
+    "version": "1.0",
+    "generated_by": "extract_knowledge.py"
+  }
+}

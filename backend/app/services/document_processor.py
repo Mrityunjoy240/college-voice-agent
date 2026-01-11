@@ -3,6 +3,7 @@ from typing import List, Dict, Any
 import logging
 from pathlib import Path
 import json
+import re
 
 # Import optional dependencies
 try:
@@ -100,33 +101,99 @@ class DocumentProcessor:
     def _process_txt(self, file_path: Path) -> str:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             return f.read()
-            
-    def _chunk_text(self, text: str, chunk_size: int = 1000, overlap: int = 100) -> List[str]:
-        """Simple text chunking"""
+    
+    def _chunk_text(self, text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
+        """
+        Smart semantic chunking preserving paragraph structure.
+        Uses recursive splitting tailored for RAG.
+        """
         if not text:
             return []
             
-        chunks = []
-        start = 0
-        text_len = len(text)
+        # normalize whitespace but keep newlines for paragraph detection
+        text = re.sub(r'[ \t]+', ' ', text)
         
-        while start < text_len:
-            end = start + chunk_size
+        # Split by double newlines (paragraphs)
+        paragraphs = re.split(r'\n\s*\n', text)
+        
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+                
+            # If paragraph itself is too large, split it by sentences
+            if len(para) > chunk_size:
+                # Process large paragraph
+                sentences = re.split(r'(?<=[.!?])\s+', para)
+                for sentence in sentences:
+                    if current_length + len(sentence) > chunk_size and current_chunk:
+                        chunks.append(' '.join(current_chunk))
+                        
+                        # Overlap
+                        overlap_text = ""
+                        overlap_len = 0
+                        for i in range(len(current_chunk)-1, -1, -1):
+                            if overlap_len + len(current_chunk[i]) > overlap:
+                                break
+                            overlap_text = current_chunk[i] + " " + overlap_text
+                            overlap_len += len(current_chunk[i])
+                            
+                        current_chunk = [overlap_text.strip()] if overlap_text.strip() else []
+                        current_length = len(current_chunk[0]) if current_chunk else 0
+                        
+                    current_chunk.append(sentence)
+                    current_length += len(sentence)
+            else:
+                # Standard paragraph handling
+                if current_length + len(para) > chunk_size and current_chunk:
+                    chunks.append(' '.join(current_chunk))
+                    
+                    # Simple overlap for paragraphs
+                    overlap_text = current_chunk[-1] if current_chunk else ""
+                    if len(overlap_text) > overlap:
+                        overlap_text = overlap_text[-overlap:]
+                    
+                    current_chunk = [overlap_text] if overlap_text else []
+                    current_length = len(overlap_text)
+                    
+                current_chunk.append(para)
+                current_length += len(para)
+        
+        if current_chunk:
+            chunks.append(' '.join(current_chunk))
             
-            # Try to find a sentence break
-            if end < text_len:
-                # Look for the last period/newline in the window
-                last_break = max(
-                    text.rfind('.', start, end),
-                    text.rfind('\n', start, end)
-                )
-                if last_break > start + chunk_size // 2:
-                    end = last_break + 1
-            
-            chunk = text[start:end].strip()
-            if chunk:
-                chunks.append(chunk)
-            
-            start = end - overlap
-            
-        return chunks
+        return chunks if chunks else [text]  # Fallback to full text if no chunks created
+    
+    async def process_files_batch(self, file_paths: List[str], metadata_list: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        Process multiple files in parallel for better performance.
+        """
+        import asyncio
+        
+        if metadata_list is None:
+            metadata_list = [None] * len(file_paths)
+        elif len(metadata_list) != len(file_paths):
+            raise ValueError("metadata_list must have same length as file_paths")
+        
+        # Create tasks for parallel processing
+        tasks = [
+            self.process_file(file_path, metadata) 
+            for file_path, metadata in zip(file_paths, metadata_list)
+        ]
+        
+        # Execute all tasks concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Flatten results and handle any exceptions
+        all_documents = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Error processing file {file_paths[i]}: {result}")
+                continue
+            all_documents.extend(result)
+        
+        return all_documents

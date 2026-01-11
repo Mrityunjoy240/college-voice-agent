@@ -6,11 +6,17 @@ from groq import Groq
 class Settings(BaseSettings):
     # API Keys
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
-    elevenlabs_api_key: str = os.getenv("ELEVENLABS_API_KEY", "")
     speechmatics_api_key: str = os.getenv("SPEECHMATICS_API_KEY", "")
+
+    # Auth Settings
+    admin_username: str = os.getenv("ADMIN_USERNAME", "admin")
+    admin_password: str = os.getenv("ADMIN_PASSWORD", "admin")
+    secret_key: str = os.getenv("SECRET_KEY", "supersecretkey")
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 30
     
     # Default voice ID for ElevenLabs (Rachel's voice)
-    elevenlabs_voice_id: str = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+    # elevenlabs_voice_id: str = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
     
     # Direct Groq client initialization
     groq_client: Optional[Groq] = None

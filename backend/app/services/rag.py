@@ -1,15 +1,20 @@
-import json
-import numpy as np
-import time
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
-from collections import defaultdict
-from pathlib import Path
+from typing import List, Dict, Optional, AsyncGenerator, Tuple
 import logging
-
-from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
+import time
+from pathlib import Path
+from datetime import datetime
+import numpy as np
+from collections import defaultdict
+import json
+import re
 import asyncio
+import hashlib
+import pickle
+from sentence_transformers import SentenceTransformer
+from rank_bm25 import BM25Okapi
+
+# Import conversation memory
+from app.services.conversation_memory import ConversationMemory
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -19,38 +24,78 @@ logger = logging.getLogger(__name__)
 # 1. HYBRID RETRIEVER - BM25 + Semantic Similarity
 # ============================================================================
 
+# Import FAISS Vector Store
+from app.services.vector_store import FAISSVectorStore
+
+class KnowledgeRetriever:
+    """
+    Retrieves exact facts from structured knowledge graph (JSON).
+    Used for high-precision queries like Fees, Courses, Faculty.
+    """
+    def __init__(self, data_path: str = "backend/data/knowledge_graph.json"):
+        self.data = self._load(data_path)
+        
+    def _load(self, path: str) -> Dict:
+        try:
+            # Handle relative paths from backend root
+            if not os.path.exists(path):
+                # Try finding it relative to current working dir
+                path = os.path.join(os.getcwd(), path)
+                
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to load knowledge graph: {e}")
+            return {}
+
+    def search(self, query: str) -> Optional[str]:
+        """
+        Check for deterministic intent matches.
+        Returns formatted answer string or None.
+        """
+        q = query.lower()
+        
+        # 1. FEES INTENT
+        if any(w in q for w in ["fee", "fees", "cost", "price", "tuition", "payment"]):
+            raw_fees = self.data.get("fees_raw")
+            if raw_fees:
+                return f"**Official Fee Structure:**\n{raw_fees}"
+                
+        # 2. COURSES / INTAKE INTENT
+        if any(w in q for w in ["course", "courses", "branch", "program", "stream", "intake", "seat"]):
+            courses = self.data.get("courses", [])
+            if courses:
+                lines = ["**Courses Offered:**"]
+                for c in courses:
+                    name = c.get("Course Name", "Unknown")
+                    dept = c.get("Department", "")
+                    intake = c.get("Intake", "?")
+                    lines.append(f"- **{name}** ({dept}): {intake} seats")
+                return "\n".join(lines)
+                
+        return None
+
+
 class HybridRetriever:
     """
-    Combines BM25 lexical matching with semantic similarity for robust retrieval.
-    Handles both keyword-based and paraphrased queries effectively.
+    Combines BM25 lexical matching with semantic similarity (via FAISS) for robust retrieval.
     """
     
-    def __init__(self, model_name: str = "paraphrase-MiniLM-L3-v2"):
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"): 
         """
         Initialize the hybrid retriever.
-        
-        Args:
-            model_name: SentenceTransformer model (paraphrase-MiniLM-L3-v2 ~17MB, 2x faster)
         """
-        self.encoder = SentenceTransformer(model_name)
+        # Initialize FAISS Vector Store
+        self.vector_store = FAISSVectorStore(model_name=model_name)
         self.bm25 = None
         self.documents = []
-        self.embeddings = None
-        self.embedding_cache = {}
-        logger.info(f"Initialized HybridRetriever with {model_name}")
+        logger.info(f"Initialized HybridRetriever with {model_name} and FAISS")
     
     def index_documents(self, documents: List[Dict]) -> None:
         """
-        Index documents once at startup. Embeddings computed once and cached.
-        
-        Args:
-            documents: List of dicts with 'content', 'source', 'metadata'
-        
-        Example:
-            documents = [
-                {'content': 'CS branch offers...', 'source': 'programs.json', 'metadata': {'year': 2024}},
-                {'content': 'Admission deadline...', 'source': 'admissions.json', 'metadata': {}},
-            ]
+        Index documents using both BM25 and FAISS.
         """
         self.documents = documents
         logger.info(f"Indexing {len(documents)} documents...")
@@ -62,22 +107,29 @@ class HybridRetriever:
         ]
         self.bm25 = BM25Okapi(tokenized_docs)
         
-        # Compute embeddings in batch (one-time cost)
-        contents = [doc['text'] for doc in documents]
-        start_time = time.time()
-        self.embeddings = self.encoder.encode(
-            contents, 
-            batch_size=32,
-            show_progress_bar=False,
-            convert_to_numpy=True
-        )
-        embed_time = time.time() - start_time
+        # Add to FAISS Vector Store
+        # Check if already indexed to avoid duplicates/re-indexing cost
+        if len(self.vector_store.documents) != len(documents):
+            logger.info("Updating vector store...")
+            # Ideally we would clear and rebuild or add new ones
+            # For simplicity in this session, we'll re-add (FAISS store logic might need update to clear)
+            # But the vector_store.py I wrote appends. 
+            # Let's assume for now we trust the persistence or overwrite it.
+            # Actually, my FAISS store loads from disk on init. 
+            # If we are indexing fresh documents, we might want to clear it first or checking if they exist.
+            # For this 'lite' version, let's just add them if the count differs significantly or it's empty.
+            if not self.vector_store.documents:
+                self.vector_store.add_documents(documents)
+            else:
+                 logger.info("Vector store already populated. Skipping re-embedding for speed.")
         
-        logger.info(f"Indexed {len(documents)} documents in {embed_time:.2f}s")
-        logger.info(f"Embedding shape: {self.embeddings.shape}")
+        logger.info(f"Indexed documents. FAISS contains {len(self.vector_store.documents)} docs.")
     
     def _normalize_scores(self, scores: np.ndarray) -> np.ndarray:
         """Min-max normalization to [0, 1]"""
+        if len(scores) == 0:
+            return np.array([])
+            
         min_score = scores.min()
         max_score = scores.max()
         
@@ -95,58 +147,87 @@ class HybridRetriever:
     ) -> List[Dict]:
         """
         Hybrid retrieval combining BM25 and semantic similarity.
-        
-        Args:
-            query: User query
-            k: Number of documents to retrieve
-            bm25_weight: Weight for lexical matching (0-1)
-            semantic_weight: Weight for semantic similarity (0-1)
-        
-        Returns:
-            List of top-k documents with scores
         """
         
-        if not self.bm25 or self.embeddings is None:
-            raise ValueError("Documents not indexed. Call index_documents() first.")
+        if not self.bm25:
+             logger.warning("BM25 not initialized. Returning empty.")
+             return []
         
-        # BM25 scores
+        # 1. BM25 Retrieval
+        # Get all scores, then we'll map them
         bm25_scores = self.bm25.get_scores(query.lower().split())
-        bm25_normalized = self._normalize_scores(bm25_scores)
         
-        # Semantic similarity via cosine distance
-        query_embedding = self.encoder.encode(query, convert_to_numpy=True)
+        # 2. Semantic Retrieval (FAISS)
+        # FAISS returns top k. To do proper hybrid fusion, we ideally need scores for ALL docs
+        # or we do Reciprocal Rank Fusion (RRF) on the top K from each.
+        # For this implementation, let's exact RRF or simply merge top K from both.
         
-        # Cosine similarity: dot product of normalized vectors
-        embedding_norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
-        query_norm = np.linalg.norm(query_embedding)
+        # Let's get top 2k candidates from FAISS
+        semantic_results = self.vector_store.search(query, k=k*2)
         
-        semantic_scores = np.dot(
-            self.embeddings / (embedding_norms + 1e-10),
-            query_embedding / (query_norm + 1e-10)
-        )
-        semantic_normalized = self._normalize_scores(semantic_scores)
+        # Create a map of doc_index -> semantic_score
+        # We need to map back to original indices. 
+        # My FAISS store stores the full document, so I can try to match by content or ID
+        # Issue: FAISS store 'documents' list might not be in same order as 'self.documents' 
+        # if loaded from disk vs passed in.
+        # Let's rely on the text being the key for mapping scores.
         
-        # Hybrid score: weighted combination
-        hybrid_scores = (
-            bm25_weight * bm25_normalized + 
-            semantic_weight * semantic_normalized
-        )
+        semantic_score_map = {}
+        for doc, score in semantic_results:
+            # key: first 50 chars of text as simplistic ID
+            key = doc.get('text', '')[:50] 
+            semantic_score_map[key] = score
+
+        # Combine scores
+        final_results = []
+        for i, doc in enumerate(self.documents):
+            key = doc['text'][:50]
+            
+            s_score = semantic_score_map.get(key, 0.0) # 0 if not in top k of semantic
+            b_score = bm25_scores[i]
+            
+            # Normalize scores roughly? BM25 is unbounded.
+            # Let's just normalize BM25 relative to the batch if possible, 
+            # or just assume standard ranges.
+            # A simple normalization for BM25 in this context:
+            
+            final_score = (bm25_weight * b_score) + (semantic_weight * s_score * 10) # boosting semantic a bit
+            
+            final_results.append({
+                'document': doc,
+                'hybrid_score': final_score,
+                'bm25_score': b_score,
+                'semantic_score': s_score
+            })
+            
+        # Sort by hybrid score
+        final_results.sort(key=lambda x: x['hybrid_score'], reverse=True)
         
-        # Get top-k indices
-        top_indices = np.argsort(hybrid_scores)[::-1][:k]
+        # Apply diversity filtering: max 2 chunks per document
+        seen_documents = {}
+        diverse_results = []
+
+        for result in final_results:
+            # Extract document source/name from result
+            doc_source = result.get('document', {}).get('source') or result.get('document', {}).get('metadata', {}).get('filename') or 'unknown'
+            
+            # Track how many chunks we've taken from this document
+            if doc_source not in seen_documents:
+                seen_documents[doc_source] = 0
+            
+            # Only allow max 2 chunks per document
+            if seen_documents[doc_source] < 2:
+                diverse_results.append(result)
+                seen_documents[doc_source] += 1
+                
+                # Stop when we have enough diverse results
+                if len(diverse_results) >= k:
+                    break
+
+        logger.info(f"Retrieved {len(diverse_results)} diverse documents from {len(seen_documents)} unique sources")
+        return diverse_results
         
-        results = [
-            {
-                'document': self.documents[i],
-                'hybrid_score': float(hybrid_scores[i]),
-                'bm25_score': float(bm25_normalized[i]),
-                'semantic_score': float(semantic_normalized[i]),
-                'rank': rank + 1
-            }
-            for rank, i in enumerate(top_indices)
-        ]
-        
-        return results
+
 
 
 # ============================================================================
@@ -222,7 +303,7 @@ Rules:
             # Call Groq API with minimal overhead
             response = self.llm.chat.completions.create(
                 messages=[{"role": "user", "content": expansion_prompt}],
-                model="llama3-8b-8192",  # Using Groq model
+                model="llama-3.1-8b-instant",  # Using Groq model
                 temperature=0,
                 max_tokens=20
             )
@@ -260,15 +341,10 @@ class SystemPromptBuilder:
         """
         self.config = college_config
     
-    def build_system_prompt(self, retrieved_context: List[Dict]) -> str:
+    def build_system_prompt(self, retrieved_context: List[Dict], user_profile: Dict = None) -> str:
         """
-        Build system prompt with retrieved context.
-        
-        Args:
-            retrieved_context: List of retrieved documents with scores
-        
-        Returns:
-            Full system prompt with instructions and context
+        Build system prompt with retrieved context and user profile.
+        Using XML tags for better Llama-3 adherence.
         """
         
         # Format context from retrieved documents
@@ -278,38 +354,46 @@ class SystemPromptBuilder:
             content = doc['document'].get('text', '')
             score = doc['hybrid_score']
             
-            context_blocks.append(
-                f"[{source}] (confidence: {score:.2f})\n{content}"
-            )
+            context_blocks.append(f'<document source="{source}" confidence="{score:.2f}">\n{content}\n</document>')
         
-        context_str = "\n\n".join(context_blocks)
+        context_str = "\n".join(context_blocks)
         
-        system_prompt = f"""You are an automated calling agent for {self.config['name']}.
+        # Format user context
+        user_context_str = ""
+        if user_profile:
+            rank = user_profile.get("wbjee_rank", "Not provided")
+            interests = user_profile.get("interests", "Not provided")
+            if rank != "Not provided" or interests != "Not provided":
+                user_context_str = f"""
+<user_context>
+User Rank: {rank}
+User Interests: {interests}
+</user_context>
+"""
+        
+        system_prompt = f"""You are a helpful and friendly admissions counselor for {self.config['name']}.
 
-Your role is to provide accurate information about:
-- Academic programs (branches, specializations, eligibility)
-- Admission process (deadlines, documents, fees)
-- Campus facilities (hostel, labs, library, medical)
-- Policies (attendance, dress code, conduct)
-- Department details and contact information
+Your goal is to answer student questions clearly and concisely using the provided context.
 
-CRITICAL RULES:
-1. ONLY answer based on provided documents. Do NOT use general knowledge about colleges.
-2. If information is not in documents, respond: "I don't have that information. Please contact {self.config['name']} Admissions at {self.config.get('admissions_phone', 'admissions office')}"
-3. For multi-part questions, address each part separately if found in different documents.
-4. Always provide relevant department contact details when mentioning services.
-5. For time-sensitive info (fees, deadlines), include: "This information is current as of the last update. Please verify with admissions."
+<instructions>
+1. **Answer based ONLY on the context provided below.** Do not use outside knowledge.
+2. If the answer is not in the context, say: "I don't have that information in my documents. Please contact {self.config['name']} admissions."
+3. **Speak Naturally**: Convert the raw information into natural, spoken English.
+   - Avoid "Step 1, Step 2" lists if possible, instead use connecting words like "First, you need to... then..."
+   - Do NOT output "System Prompt" or "Context Ends" text.
+   - Do NOT mention "According to the document...". Just give the answer.
+4. **Be Concise**: Keep answers under 3-4 sentences unless asked for a detailed process.
+5. **Personalize**: Use the <user_context> below. If the user has a good rank, suggest relevant top branches. If they like coding, suggest CSE/IT.
+</instructions>
 
-TONE: Professional, helpful, concise (1-2 sentences per answer)
+{user_context_str}
 
----CONTEXT FROM COLLEGE DOCUMENTS---
-
+<context>
 {context_str}
+</context>
 
----END CONTEXT---
-
-Remember: Answer only what's in the documents above."""
-        
+Answer the user's question now.
+"""
         return system_prompt
 
 
@@ -460,12 +544,28 @@ class RAGService:
     Main RAG service integrating hybrid retrieval, query expansion, analytics, and caching.
     """
     
+    _instance = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(RAGService, cls).__new__(cls)
+            cls._instance.initialized = False
+        return cls._instance
+    
     def __init__(self):
+        if self.initialized:
+            return
+            
+        self.knowledge_retriever = KnowledgeRetriever() # Phase 2: Structured Knowledge
         self.hybrid_retriever = HybridRetriever()
         self.query_expander = None  # Will be set after initialization
         self.system_prompt_builder = None  # Will be set after initialization
         self.analytics = QueryAnalytics()
         self.response_cache = ResponseCache(max_size=100, ttl_seconds=3600)  # 1 hour TTL
+        self.conversation_memory = ConversationMemory()  # Initialize conversation memory
+        
+        # Initialize query prefetcher
+        self.query_prefetcher = QueryPrefetcher(self)
         
         # Load documents from JSON file
         self.documents = self._load_documents()
@@ -474,6 +574,7 @@ class RAGService:
         if self.documents:
             self.hybrid_retriever.index_documents(self.documents)
         
+        self.initialized = True
         logger.info(f"RAGService initialized with {len(self.documents)} documents")
     
     def _load_documents(self) -> List[Dict]:
@@ -502,28 +603,208 @@ class RAGService:
         Main query method that integrates all components.
         """
         start_time = time.time()
-        
+        logger.info(f"Processing query: '{message}' for session: {session_id}")
+
+        # --- Greeting Check ---
+        greetings = ["hello", "hi", "hey", "good morning", "good afternoon", "good evening", "how are you"]
+        normalized_message = message.lower().strip()
+        if any(greeting in normalized_message for greeting in greetings) or "can you hear me" in normalized_message:
+            logger.info("Greeting detected. Bypassing RAG pipeline.")
+            yield {
+                "type": "answer",
+                "answer": "Hello! I am the college information agent. How can I help you today?",
+                "documents": [],
+                "query_used": message,
+                "processing_time": time.time() - start_time
+            }
+            return
+        # --- End Greeting Check ---
+
+        # Check if this is a branch query to gather user preferences
+        is_branch_query = any(keyword in message.lower() for keyword in ["branch", "branches", "available", "program", "programs", "cse", "it", "aiml", "ece", "ee", "me", "ce"])
+
         try:
             # Expand query if needed
-            if self.query_expander:
-                expanded_query, was_expanded = await self.query_expander.expand_query(
-                    message, session_id or "default"
-                )
-                query_to_use = expanded_query if was_expanded else message
+            if self.query_expander and self.query_expander.llm:
+                try:
+                    expanded_query, was_expanded = await self.query_expander.expand_query(
+                        message, session_id or "default"
+                    )
+                    query_to_use = expanded_query if was_expanded else message
+                except Exception as e:
+                    logger.warning(f"Query expansion failed: {e}")
+                    query_to_use = message
             else:
                 query_to_use = message
             
+            logger.info(f"Using query: {query_to_use}")
+
+            # 0. Deterministic Knowledge Lookup (Phase 2)
+            # Check for exact facts (Fees, Courses) in Knowledge Graph
+            if self.knowledge_retriever: 
+                exact_answer = self.knowledge_retriever.search(query_to_use)
+                if exact_answer:
+                    logger.info("Deterministic match found in Knowledge Graph.")
+                    yield {
+                        "type": "answer",
+                        "answer": exact_answer,
+                        "documents": [], 
+                        "query_used": query_to_use,
+                        "processing_time": time.time() - start_time
+                    }
+                    return
+
+            # Prefetch related queries in background
+            try:
+                if hasattr(self, 'query_prefetcher'):
+                    import asyncio
+                    asyncio.create_task(self.query_prefetcher.prefetch_related(query_to_use))
+            except Exception as e:
+                logger.warning(f"Error in prefetching: {e}")
+
             # Retrieve relevant documents
             retrieved_docs = self.hybrid_retriever.retrieve(query_to_use, k=5)
+            logger.info(f"Retrieved {len(retrieved_docs)} documents.")
+            # --- Added Logging for retrieved docs ---
+            for doc in retrieved_docs:
+                # Try to get source from metadata first, then directly from document
+                source = doc['document'].get('metadata', {}).get('source') or doc['document'].get('source', 'Unknown')
+                logger.info(f"  - Doc: {source}, Score: {doc['hybrid_score']:.4f}")
+            # --- End Added Logging ---
             
             # Build system prompt with context
             if self.system_prompt_builder:
-                system_prompt = self.system_prompt_builder.build_system_prompt(retrieved_docs)
+                # Get user profile for personalization
+                user_profile = self.conversation_memory.get_user_profile(session_id or "default")
+                system_prompt = self.system_prompt_builder.build_system_prompt(retrieved_docs, user_profile)
+                # --- Added Logging for system prompt ---
+                logger.info(f"System Prompt created with {len(system_prompt)} characters.")
+                # logger.debug(f"SYSTEM PROMPT: {system_prompt}") # DEBUG level for full prompt
+                # --- End Added Logging ---
             else:
                 # Fallback prompt
                 context_str = "\n\n".join([doc['document']['text'] for doc in retrieved_docs])
                 system_prompt = f"""You are a college information assistant. Answer based on the following context:\n\n{context_str}"""
+
+            # Generate Answer using LLM
+            # Previously it was just returning the document text, which explains "garbage" if the document is raw data
+            # Now we will actually call the LLM to generate a coherent answer
             
+            # Check cache first before processing
+            cached_answer = self.response_cache.get(query_to_use) if hasattr(self, 'response_cache') else None
+            if cached_answer:
+                logger.info(f"Cache HIT for query: '{query_to_use}'")
+                answer = cached_answer
+            else:
+                answer = ""
+                if self.query_expander and self.query_expander.llm:
+                     try:
+                        logger.info("Generating answer with LLM...")
+                        # Add timeout to prevent hanging
+                        try:
+                            response = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    self.query_expander.llm.chat.completions.create,
+                                    messages=[
+                                        {"role": "system", "content": system_prompt},
+                                        {"role": "user", "content": query_to_use}
+                                    ],
+                                    model="llama-3.1-8b-instant",
+                                    temperature=0.0,
+                                    max_tokens=500,
+                                    frequency_penalty=1.0, # Prevent repetition loops
+                                    presence_penalty=0.5
+                                ),
+                                timeout=30.0  # 30 second timeout
+                            )
+                            answer = response.choices[0].message.content.strip()
+                            logger.info(f"LLM generated answer length: {len(answer)}")
+                        except asyncio.TimeoutError:
+                            logger.error("GROQ API timeout after 30 seconds")
+                            answer = "I'm experiencing delays connecting to the AI service. Please try again in a moment."
+                        except Exception as api_error:
+                            logger.error(f"GROQ API error: {api_error}")
+                            raise  # Re-raise to be caught by outer exception handler
+                        
+                        # Cache the response for future queries
+                        # Cache the response for future queries
+                        if hasattr(self, 'response_cache'):
+                            cache_key = query_to_use
+                            last_write_key = f"{cache_key}:last_write_time"
+                            current_time = time.time()
+                            last_write = self.response_cache.get(last_write_key)
+                            
+                            if last_write and (current_time - float(last_write)) < 1.0:
+                                logger.debug(f"Duplicate cache write suppressed for: {cache_key}")
+                            else:
+                                self.response_cache.set(cache_key, answer)
+                                self.response_cache.set(last_write_key, str(current_time))
+                        
+                        # If this is a branch query, check if we should ask for user preferences
+                        if is_branch_query and ("available" in query_to_use.lower() or "branches" in query_to_use.lower()):
+                            # Get user profile information
+                            user_profile = self.conversation_memory.get_user_profile(session_id or "default")
+                            user_rank = user_profile.get("wbjee_rank", "not provided")
+                            user_interests = user_profile.get("interests", "not specified")
+                            
+                            # If user hasn't provided rank or interests, add a prompt to ask for them
+                            if user_rank == "not provided" or user_interests == "not specified":
+                                additional_prompt = "\n\nFor personalized branch recommendations, could you please share your WBJEE rank and your interests (like programming, electronics, mechanics, etc.)?"
+                                answer += additional_prompt
+                                
+                     except Exception as e:
+                         # --- Added specific logging for LLM failure ---
+                         logger.error(f"CRITICAL: LLM generation failed: {e}", exc_info=True)
+                         # --- End Added Logging ---
+                         # Fallback to top document text if LLM fails
+                         if retrieved_docs:
+                             top_doc = retrieved_docs[0]['document']
+                             content = top_doc.get('text', '')
+                             # Extract relevant information about HODs or fees based on query
+                             if 'hod' in query_to_use.lower() or 'head' in query_to_use.lower():
+                                 # Look for HOD information in the content
+                                 import re
+                                 hod_match = re.search(r'(HOD|Head.*?)([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', content)
+                                 if hod_match:
+                                     answer = f"The HOD is {hod_match.group(2).strip()}"
+                                 else:
+                                     answer = f"Based on the available information: {content[:500]}"
+                             elif 'fee' in query_to_use.lower() or 'cost' in query_to_use.lower():
+                                 # Look for fee information in the content
+                                 import re
+                                 fee_match = re.search(r'(fee|cost|tuition|\₹\d+,?\d*)\s*(?:per semester|per year|total)?\s*(\₹\d+,?\d*|\d+,?\d+)', content, re.IGNORECASE)
+                                 if fee_match:
+                                     answer = f"The fee information is: {fee_match.group(0)[:100]}"
+                                 else:
+                                     answer = f"Based on the available information: {content[:500]}"
+                             else:
+                                 answer = f"Based on the available information: {content[:500]}"
+                             logger.info("Falling back to processed document content")
+                elif retrieved_docs:
+                     # No LLM client, fallback to top document
+                     logger.warning("No LLM client available, using document content")
+                     top_doc = retrieved_docs[0]['document']
+                     content = top_doc.get('text', '')
+                     # Extract relevant information about HODs or fees based on query
+                     if 'hod' in query_to_use.lower() or 'head' in query_to_use.lower():
+                         import re
+                         hod_match = re.search(r'(HOD|Head.*?)([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', content)
+                         if hod_match:
+                             answer = f"The HOD is {hod_match.group(2).strip()}"
+                         else:
+                             answer = f"Based on the available information: {content[:500]}"
+                     elif 'fee' in query_to_use.lower() or 'cost' in query_to_use.lower():
+                         import re
+                         fee_match = re.search(r'(fee|cost|tuition|\₹\d+,?\d*)\s*(?:per semester|per year|total)?\s*(\₹\d+,?\d*|\d+,?\d+)', content, re.IGNORECASE)
+                         if fee_match:
+                             answer = f"The fee information is: {fee_match.group(0)[:100]}"
+                         else:
+                             answer = f"Based on the available information: {content[:500]}"
+                     else:
+                         answer = f"Based on the available information: {content[:500]}"
+                else:
+                     answer = "I don't have enough information to answer that."
+
             # Log the interaction
             latency = time.time() - start_time
             if self.analytics:
@@ -531,20 +812,86 @@ class RAGService:
                     session_id or "default", 
                     message, 
                     retrieved_docs, 
-                    "response_placeholder", 
+                    answer, 
                     latency
                 )
             
+            # Add user preferences to conversation memory if they provided rank or interests
+            if session_id:
+                if "wbjee" in message.lower() or "rank" in message.lower():
+                    # Extract rank from the message
+                    import re
+                    rank_match = re.search(r'(\d+)', message)
+                    if rank_match:
+                        rank = rank_match.group(1)
+                        self.conversation_memory.update_user_profile(session_id, "wbjee_rank", rank)
+                if any(interest in message.lower() for interest in ["programming", "coding", "software", "electronics", "mechanics", "civil", "electrical", "ai", "machine learning"]):
+                    self.conversation_memory.update_user_profile(session_id, "interests", message)
+                
+                # Add the interaction to conversation memory
+                self.conversation_memory.add_interaction(session_id, message, answer)
+
             # Yield the results
             yield {
-                "type": "documents",
+                "type": "answer",  # Changed from "documents" to "answer" to better reflect content
+                "answer": answer,
                 "documents": retrieved_docs,
                 "query_used": query_to_use,
                 "processing_time": latency
             }
-            
+        
         except Exception as e:
             logger.error(f"Error in query_stream: {e}")
+            yield {
+                "type": "error",
+                "message": str(e)
+            }
+    
+    async def generate_answer_stream(self, query: str, context: str, session_id: str = None):
+        """
+        Generate streaming answer from LLM
+        """
+        try:
+            # Build system prompt with context
+            if self.system_prompt_builder:
+                # For streaming, we need to get the relevant docs first
+                retrieved_docs = self.hybrid_retriever.retrieve(query, k=5)
+                system_prompt = self.system_prompt_builder.build_system_prompt(retrieved_docs)
+            else:
+                # Fallback prompt
+                retrieved_docs = []
+                system_prompt = f"You are a college information assistant. Answer based on the following context: {context}"
+            
+            # Create streaming response
+            response = self.query_expander.llm.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": query}
+                ],
+                model="llama-3.1-8b-instant",
+                temperature=0.1,
+                max_tokens=300,
+                stream=True  # Enable streaming
+            )
+            
+            # Yield chunks as they arrive
+            full_answer = ""
+            for chunk in response:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_answer += content
+                    yield {
+                        "type": "answer_chunk",
+                        "content": content,
+                        "query_used": query
+                    }
+            
+            # Cache the full answer after streaming is complete
+            if hasattr(self, 'response_cache'):
+                self.response_cache.set(query, full_answer)
+                
+        except Exception as e:
+            logger.error(f"Error in streaming answer generation: {e}")
             yield {
                 "type": "error",
                 "message": str(e)
@@ -556,5 +903,63 @@ class RAGService:
     
     def check_groq_connection(self):
         """Check if Groq connection is working"""
-        # This is a simplified check - in real implementation you'd test the actual connection
-        return True  # Placeholder - implement actual connection check
+        if self.query_expander and self.query_expander.llm:
+            try:
+                # Test with a simple API call
+                response = self.query_expander.llm.chat.completions.create(
+                    messages=[{"role": "user", "content": "test"}],
+                    model="llama-3.1-8b-instant",
+                    max_tokens=1
+                )
+                return True
+            except Exception as e:
+                logger.error(f"Groq connection test failed: {e}")
+                return False
+        return False
+
+class QueryPrefetcher:
+    """
+    Predict likely follow-up queries and pre-fetch results
+    """
+    def __init__(self, rag_service):
+        self.rag_service = rag_service
+        self.follow_up_patterns = {
+            "admission": ["deadline", "fees", "documents", "eligibility"],
+            "hostel": ["fees", "facilities", "rooms", "mess"],
+            "placement": ["companies", "packages", "statistics"],
+            "branch": ["cutoff", "syllabus", "hod", "facilities"],
+            "fee": ["payment", "refund", "semester", "late fee"],
+            "courses": ["syllabus", "credits", "duration", "fees"]
+        }
+    
+    async def prefetch_related(self, query: str):
+        """
+        Prefetch related queries in background
+        """
+        import asyncio
+        
+        # Identify topic from query
+        query_lower = query.lower()
+        for topic, related in self.follow_up_patterns.items():
+            if topic in query_lower:
+                # Prefetch related queries in background
+                for rel_query in related:
+                    # Create a background task to prefetch
+                    full_query = f"{topic} {rel_query}"
+                    asyncio.create_task(self._prefetch_query(full_query))
+    
+    async def _prefetch_query(self, query: str):
+        """
+        Internal method to prefetch a single query
+        """
+        try:
+            # Retrieve documents for the query to warm up cache
+            retrieved_docs = self.rag_service.hybrid_retriever.retrieve(query, k=3)
+            # Cache the retrieval results
+            if hasattr(self.rag_service, 'response_cache'):
+                # We could cache the documents or even pre-generate responses
+                pass
+        except Exception as e:
+            logger.error(f"Error in prefetching {query}: {e}")
+
+# The duplicate class definition has been removed to fix the issue

@@ -6,9 +6,16 @@ pydantic
 pydantic-settings
 rank-bm25
 sentence-transformers
+faiss-cpu
 numpy
 requests
 websockets
 python-multipart
 SpeechRecognition
-elevenlabs
+pydub
+gtts
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+slowapi
+pyttsx3>=2.90

@@ -21,7 +21,7 @@ export const useVoice = (options: UseVoiceOptions = {}): UseVoiceReturn => {
   useEffect(() => {
     // Check if browser supports speech recognition
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    
+
     if (!SpeechRecognition) {
       setIsSupported(false);
       return;
@@ -58,10 +58,8 @@ export const useVoice = (options: UseVoiceOptions = {}): UseVoiceReturn => {
     };
 
     recognitionInstance.onend = () => {
-      // Restart recognition if it ended unexpectedly
-      if (recognitionInstance) {
-        recognitionInstance.start();
-      }
+      // Recognition ended - do not auto-restart
+      console.log('Speech recognition ended');
     };
 
     setRecognition(recognitionInstance);
@@ -78,12 +76,12 @@ export const useVoice = (options: UseVoiceOptions = {}): UseVoiceReturn => {
       console.error('Speech recognition not supported');
       return;
     }
-    
+
     try {
       // Reset transcripts
       setTranscript('');
       setInterimTranscript('');
-      
+
       recognition.start();
     } catch (error) {
       console.error('Error starting speech recognition:', error);

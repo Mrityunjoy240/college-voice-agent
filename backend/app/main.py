@@ -1,14 +1,36 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from app.api import qa, voice
 import logging
+import os
+from uuid import uuid4
+
+from app.logging_config import setup_logging
+from app.config import settings
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # Create FastAPI app
 app = FastAPI(title="College Voice Agent API", version="1.0.0")
+
+# Add Session ID Middleware
+@app.middleware("http")
+async def add_session_id_middleware(request: Request, call_next):
+    """Inject a unique session_id into request.state for every request"""
+    if not hasattr(request.state, 'session_id'):
+        request.state.session_id = str(uuid4())
+    response = await call_next(request)
+    return response
+
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from app.limiter import limiter
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Add CORS middleware
 app.add_middleware(
@@ -19,9 +41,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Ensure temp audio directory exists
+os.makedirs(settings.temp_audio_dir, exist_ok=True)
+
+# Mount static directory for audio files
+app.mount("/audio", StaticFiles(directory=settings.temp_audio_dir), name="audio")
+
 # Include API routes
 app.include_router(qa.router, prefix="/qa", tags=["qa"])
 app.include_router(voice.router, prefix="/voice", tags=["voice"])
+from app.api import monitoring, auth_routes, admin, health
+app.include_router(monitoring.router, prefix="/monitoring", tags=["monitoring"])
+app.include_router(health.router, prefix="/health", tags=["health"])
+app.include_router(auth_routes.router, tags=["auth"])
+app.include_router(admin.router, prefix="/admin", tags=["admin"])
 
 @app.get("/")
 async def root():

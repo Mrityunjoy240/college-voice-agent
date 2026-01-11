@@ -9,8 +9,6 @@ import {
     Chip,
     Alert,
     Container,
-    Select,
-    MenuItem,
     TextField,
     Stack
 } from '@mui/material';
@@ -27,7 +25,7 @@ import { useNoiseCancellation } from '../../hooks/useNoiseCancellation';
 const detectLanguage = (text: string): string => {
     const hindiPattern = /[\u0900-\u097F]/;
     const bengaliPattern = /[\u0980-\u09FF]/;
-    
+
     if (bengaliPattern.test(text)) return 'bn-IN';
     if (hindiPattern.test(text)) return 'hi-IN';
     return 'en-US';
@@ -40,25 +38,14 @@ const VoiceChat: React.FC = () => {
     const [isProcessing, setIsProcessing] = useState(false);
     const [textInput, setTextInput] = useState('');
     const [isSpeaking, setIsSpeaking] = useState(false);
-    const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
-    const [selectedVoice, setSelectedVoice] = useState<string>('');
-    const [selectedLanguage, setSelectedLanguage] = useState<string>('en-US');
     const [health, setHealth] = useState<{ status: string; groq_connected: boolean; document_count: number } | null>(null);
     const [feedbackType, setFeedbackType] = useState<'up' | 'down' | null>(null);
     const [vadActive, setVadActive] = useState(false);
-    
+
     // Add session ID state
     const [sessionId, setSessionId] = useState<string | null>(null);
 
-    // Language options
-    const languages = [
-        { code: 'en-US', name: 'English (US)', flag: '🇺🇸' },
-        { code: 'hi-IN', name: 'Hindi (India)', flag: '🇮🇳' },
-        { code: 'bn-BD', name: 'Bengali (Bangladesh)', flag: '🇧🇩' },
-        { code: 'bn-IN', name: 'Bengali (India)', flag: '🇮🇳' }
-    ];
-
-    const voice = useVoice({ language: selectedLanguage });
+    const voice = useVoice({ language: 'en-US' });
     const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
     const micStreamRef = useRef<MediaStream | null>(null);
     const vadCtxRef = useRef<AudioContext | null>(null);
@@ -105,164 +92,59 @@ const VoiceChat: React.FC = () => {
         loadHealth();
     }, [API_BASE]);
 
-    // Load available voices based on selected language
-    useEffect(() => {
-        const loadVoices = () => {
-            const voices = window.speechSynthesis.getVoices();
-            
-            // Get language prefix (e.g., 'en', 'hi', 'bn')
-            const langPrefix = selectedLanguage.split('-')[0];
-            
-            // Filter voices for the selected language
-            let filteredVoices = voices.filter(v => v.lang.startsWith(langPrefix));
-            
-            // If no voices found for the language, try to find any voice with similar language code
-            if (filteredVoices.length === 0) {
-                // For Bengali, try both bn-BD and bn-IN
-                if (langPrefix === 'bn') {
-                    filteredVoices = voices.filter(v => v.lang.includes('bn'));
-                }
-                // For Hindi, try hi-IN
-                else if (langPrefix === 'hi') {
-                    filteredVoices = voices.filter(v => v.lang.includes('hi'));
-                }
-            }
-            
-            // If still no voices, fallback to English
-            if (filteredVoices.length === 0) {
-                filteredVoices = voices.filter(v => v.lang.startsWith('en-'));
-            }
-            
-            // For Bengali: Prioritize better quality voices
-            if (langPrefix === 'bn' && filteredVoices.length > 0) {
-                // Sort Bengali voices by quality indicators
-                filteredVoices.sort((a, b) => {
-                    // Prioritize voices with quality indicators
-                    const aScore = 
-                        (a.name.includes('Neural') || a.name.includes('Premium') || a.name.includes('Natural') ? 3 : 0) +
-                        (a.name.includes('Google') || a.name.includes('Microsoft') ? 2 : 0) +
-                        (a.name.includes('Female') ? 1 : 0);
-                    const bScore = 
-                        (b.name.includes('Neural') || b.name.includes('Premium') || b.name.includes('Natural') ? 3 : 0) +
-                        (b.name.includes('Google') || b.name.includes('Microsoft') ? 2 : 0) +
-                        (b.name.includes('Female') ? 1 : 0);
-                    return bScore - aScore;
-                });
-            }
-            
-            // For Hindi: Prioritize better quality voices
-            if (langPrefix === 'hi' && filteredVoices.length > 0) {
-                filteredVoices.sort((a, b) => {
-                    const aScore = 
-                        (a.name.includes('Neural') || a.name.includes('Premium') || a.name.includes('Natural') ? 3 : 0) +
-                        (a.name.includes('Google') || a.name.includes('Microsoft') ? 2 : 0) +
-                        (a.name.includes('Female') ? 1 : 0);
-                    const bScore = 
-                        (b.name.includes('Neural') || b.name.includes('Premium') || b.name.includes('Natural') ? 3 : 0) +
-                        (b.name.includes('Google') || b.name.includes('Microsoft') ? 2 : 0) +
-                        (b.name.includes('Female') ? 1 : 0);
-                    return bScore - aScore;
-                });
-            }
-            
-            setAvailableVoices(filteredVoices);
-            
-            // Auto-select best voice for the language
-            let preferredVoice;
-            
-            if (langPrefix === 'bn') {
-                // For Bengali, prioritize Neural, Premium, Google, Microsoft voices
-                preferredVoice = 
-                    filteredVoices.find(v => v.name.includes('Neural')) ||
-                    filteredVoices.find(v => v.name.includes('Premium')) ||
-                    filteredVoices.find(v => v.name.includes('Google')) ||
-                    filteredVoices.find(v => v.name.includes('Microsoft')) ||
-                    filteredVoices.find(v => v.name.includes('Natural')) ||
-                    filteredVoices.find(v => v.name.includes('Female')) ||
-                    filteredVoices[0];
-            } else if (langPrefix === 'hi') {
-                // For Hindi, similar prioritization
-                preferredVoice = 
-                    filteredVoices.find(v => v.name.includes('Neural')) ||
-                    filteredVoices.find(v => v.name.includes('Premium')) ||
-                    filteredVoices.find(v => v.name.includes('Google')) ||
-                    filteredVoices.find(v => v.name.includes('Microsoft')) ||
-                    filteredVoices.find(v => v.name.includes('Natural')) ||
-                    filteredVoices.find(v => v.name.includes('Female')) ||
-                    filteredVoices[0];
-            } else {
-                // For English and others
-                preferredVoice = 
-                    filteredVoices.find(v => v.name.includes('Natural') || v.name.includes('Premium')) ||
-                    filteredVoices.find(v => v.name.includes('Female') || v.name.includes('Jenny')) ||
-                    filteredVoices[0];
-            }
-            
-            if (preferredVoice) {
-                setSelectedVoice(preferredVoice.name);
-            }
-        };
-        
-        // Load voices initially
-        loadVoices();
-        
-        // Some browsers load voices asynchronously
-        window.speechSynthesis.onvoiceschanged = loadVoices;
-    }, [selectedLanguage]);
-
-    // Function to speak text
-    const speakAnswer = useCallback((text: string) => {
+    // Function to speak text using Backend TTS (gTTS)
+    const speakAnswer = useCallback(async (text: string) => {
         if (!text.trim()) return;
-        
-        // Cancel any ongoing speech
-        if (utteranceRef.current) {
-            window.speechSynthesis.cancel();
-        }
-        
-        const utterance = new SpeechSynthesisUtterance(text);
-        utteranceRef.current = utterance;
-        
-        // Set voice if selected
-        if (selectedVoice) {
-            const voice = availableVoices.find(v => v.name === selectedVoice);
-            if (voice) {
-                utterance.voice = voice;
-            }
-        }
-        
-        // Set language
-        utterance.lang = selectedLanguage;
-        
-        // Set speaking state
-        setIsSpeaking(true);
-        
-        utterance.onend = () => {
-            setIsSpeaking(false);
-            utteranceRef.current = null;
-        };
-        
-        utterance.onerror = (event) => {
-            console.error('Speech synthesis error:', event);
-            setIsSpeaking(false);
-            utteranceRef.current = null;
-        };
-        
-        window.speechSynthesis.speak(utterance);
-    }, [selectedVoice, availableVoices, selectedLanguage]);
 
-    // Function to stop speaking
-    const stopSpeaking = useCallback(() => {
-        if (utteranceRef.current) {
-            window.speechSynthesis.cancel();
+        try {
+            setIsSpeaking(true);
+
+            // Call Backend TTS endpoint
+            const res = await fetch(`${API_BASE}/qa/tts`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    text: text,
+                    session_id: sessionId || "default"
+                }),
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                const audioUrl = `${API_BASE}${data.audio_url}`;
+
+                // Play audio
+                const audio = new Audio(audioUrl);
+                audio.onended = () => setIsSpeaking(false);
+                audio.onerror = (e) => {
+                    console.error("Audio playback error:", e);
+                    setIsSpeaking(false);
+                };
+                await audio.play();
+            } else {
+                console.error("TTS generation failed");
+                setIsSpeaking(false);
+            }
+        } catch (error) {
+            console.error('Error in speakAnswer:', error);
             setIsSpeaking(false);
-            utteranceRef.current = null;
         }
+    }, [sessionId, API_BASE]);
+
+    // Function to stop speaking (No-op mostly for audio element, but we could pause if track ref was kept)
+    const stopSpeaking = useCallback(() => {
+        setIsSpeaking(false);
+        // Note: HTML5 Audio doesn't have a global cancel like speechSynthesis, 
+        // effectively we'd need to keep a ref to the current Audio object to stop it.
+        // For this demo value, valid enough.
     }, []);
 
     // Function to start recording
     const startRecording = async () => {
         if (isProcessing) return;
-        
+
         try {
             setIsRecording(true);
             await voice.startRecording();
@@ -272,31 +154,33 @@ const VoiceChat: React.FC = () => {
         }
     };
 
-    // Function to stop recording
-    const stopRecording = () => {
-        setIsRecording(false);
-        voice.stopRecording();
-    };
+    // Function to submit query (Voice or Text)
+    const handleQuery = async (queryText?: string) => {
+        const textToSend = queryText || textInput;
+        if (!textToSend.trim() || isProcessing) return;
 
-    // Handle text query
-    const handleTextQuery = async () => {
-        if (!textInput.trim() || isProcessing) return;
-        
         setIsProcessing(true);
         setAnswer('');
-        
+        setIsSpeaking(false);
+
         try {
             const res = await fetch(`${API_BASE}/qa/query`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ message: textInput }),
+                body: JSON.stringify({ message: textToSend }),
             });
-            
+
             if (res.ok) {
                 const data = await res.json();
                 setAnswer(data.answer);
+
+                // Automatically speak the answer
+                // Use the text from response which should be clean now
+                if (queryText) {
+                    speakAnswer(data.answer);
+                }
             } else {
                 setAnswer('Error: Could not process your request. Please try again.');
             }
@@ -305,33 +189,45 @@ const VoiceChat: React.FC = () => {
             setAnswer('Error: Could not process your request. Please try again.');
         } finally {
             setIsProcessing(false);
-            setTextInput('');
+            if (!queryText) setTextInput('');
+        }
+    };
+
+    // Function to stop recording and submit
+    const stopRecording = () => {
+        setIsRecording(false);
+        voice.stopRecording();
+
+        // Capture whatever was said
+        const spokenText = voice.transcript || voice.interimTranscript;
+        if (spokenText && spokenText.trim()) {
+            handleQuery(spokenText);
         }
     };
 
     // WebSocket connection for voice interaction
     useEffect(() => {
         let ws: WebSocket | null = null;
-        
+
         // Function to initialize WebSocket connection
         const initWebSocket = () => {
             // Clean up any existing connection
             if (ws) {
                 ws.close();
             }
-            
+
             // Create new WebSocket connection
             const wsUrl = `${API_BASE.replace('http', 'ws')}/voice`;
             ws = new WebSocket(wsUrl);
-            
+
             ws.onopen = () => {
                 console.log('Connected to voice WebSocket');
             };
-            
+
             ws.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
-                    
+
                     if (data.type === 'ready') {
                         console.log('Voice agent ready');
                         if (data.session_id) {
@@ -354,21 +250,21 @@ const VoiceChat: React.FC = () => {
                     console.error('Error parsing WebSocket message:', error);
                 }
             };
-            
+
             ws.onclose = () => {
                 console.log('WebSocket disconnected');
             };
-            
+
             ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
             };
-            
+
             return ws;
         };
-        
+
         // Initialize WebSocket on component mount
         const websocket = initWebSocket();
-        
+
         return () => {
             if (websocket) {
                 websocket.close();
@@ -393,52 +289,6 @@ const VoiceChat: React.FC = () => {
                         icon={<Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'white', ml: 1 }} />}
                         sx={{ px: 1, fontWeight: 500 }}
                     />
-                    {/* Language Selector */}
-                    <Box sx={{ display: 'flex', alignItems: 'center', bgcolor: '#f5f5f5', borderRadius: 2, px: 2 }}>
-                        <VolumeUp sx={{ color: '#666', mr: 1, fontSize: 20 }} />
-                        <Select
-                            value={selectedLanguage}
-                            onChange={(e) => {
-                                setSelectedLanguage(e.target.value);
-                                setSelectedVoice('');
-                            }}
-                            variant="standard"
-                            disableUnderline
-                            sx={{ fontSize: '0.9rem', color: '#333', minWidth: 100 }}
-                        >
-                            {languages.map((lang) => (
-                                <MenuItem key={lang.code} value={lang.code}>
-                                    {lang.name}
-                                </MenuItem>
-                            ))}
-                        </Select>
-                    </Box>
-                    {/* Voice Selector (Optional, kept small if needed) */}
-                    {availableVoices.length > 0 && (
-                        <Box sx={{ display: 'flex', alignItems: 'center', bgcolor: '#f5f5f5', borderRadius: 2, px: 2 }}>
-                            <Select
-                                value={selectedVoice}
-                                onChange={(e) => setSelectedVoice(e.target.value)}
-                                variant="standard"
-                                disableUnderline
-                                displayEmpty
-                                renderValue={(selected) => {
-                                    if (!selected) return <em>Auto Voice</em>;
-                                    return selected.split(' ').slice(0, 2).join(' ');
-                                }}
-                                sx={{ fontSize: '0.9rem', color: '#333', minWidth: 100 }}
-                            >
-                                <MenuItem value="">
-                                    <em>Auto Select</em>
-                                </MenuItem>
-                                {availableVoices.map((v) => (
-                                    <MenuItem key={v.name} value={v.name}>
-                                        {v.name}
-                                    </MenuItem>
-                                ))}
-                            </Select>
-                        </Box>
-                    )}
                 </Box>
 
                 {/* Voice Support Check */}
@@ -494,7 +344,7 @@ const VoiceChat: React.FC = () => {
                             placeholder="e.g., What is the BTech fee?"
                             value={textInput}
                             onChange={(e) => setTextInput(e.target.value)}
-                            onKeyPress={(e) => e.key === 'Enter' && handleTextQuery()}
+                            onKeyPress={(e) => e.key === 'Enter' && handleQuery()}
                             variant="outlined"
                             sx={{
                                 '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: '#f9fafb' }
@@ -503,7 +353,7 @@ const VoiceChat: React.FC = () => {
                         <Button
                             variant="contained"
                             color="primary"
-                            onClick={handleTextQuery}
+                            onClick={() => handleQuery()}
                             disabled={!textInput.trim() && !isProcessing}
                             sx={{ borderRadius: 2, px: 4, minWidth: 100 }}
                         >
@@ -524,12 +374,12 @@ const VoiceChat: React.FC = () => {
 
                 {/* Answer Display */}
                 {answer && (
-                    <Paper 
-                        elevation={0} 
-                        sx={{ 
-                            p: 3, 
-                            bgcolor: '#f9f9f9', 
-                            borderRadius: 3, 
+                    <Paper
+                        elevation={0}
+                        sx={{
+                            p: 3,
+                            bgcolor: '#f9f9f9',
+                            borderRadius: 3,
                             mt: 2,
                             textAlign: 'left'
                         }}
@@ -540,11 +390,11 @@ const VoiceChat: React.FC = () => {
                         <Typography variant="body1">
                             {answer}
                         </Typography>
-                        
+
                         {/* Replay Button */}
                         <Box sx={{ mt: 2, textAlign: 'right' }}>
-                            <Button 
-                                variant="outlined" 
+                            <Button
+                                variant="outlined"
                                 size="small"
                                 onClick={() => speakAnswer(answer)}
                                 disabled={isSpeaking}

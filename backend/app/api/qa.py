@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import asyncio
@@ -6,11 +6,13 @@ import json
 import logging
 import os
 from pathlib import Path
+import time
 
 from app.services.rag import RAGService
 from app.config import settings
 from app.services.tts import TTSService
 from app.services.stt import STTService
+from app.limiter import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -33,21 +35,25 @@ class QueryResponse(BaseModel):
 
 class TTSRequest(BaseModel):
     text: str
-    voice_id: Optional[str] = None
     session_id: Optional[str] = None
 
 @router.post("/query", response_model=QueryResponse)
-async def query_endpoint(request: QueryRequest):
+@limiter.limit("20/minute")
+async def query_endpoint(request: Request, query_data: QueryRequest):
     """Handle text-based queries with response caching"""
+    start_time = time.time()
+    session_id = getattr(request.state, 'session_id', 'default')
+    logger.info(f"[{session_id}] Query received: '{query_data.message[:60]}...'")
     try:
         # Check cache first for instant response
-        cached_answer = rag_service.response_cache.get(request.message)
+        cached_answer = rag_service.response_cache.get(query_data.message)
         if cached_answer:
-            logger.info(f"Returning cached response for: {request.message[:50]}...")
+            logger.info(f"Returning cached response for: {query_data.message[:50]}...")
+            session_id = getattr(request.state, 'session_id', 'default')
             return QueryResponse(
                 answer=cached_answer,
                 sources=[],
-                session_id=request.session_id or "default"
+                session_id=session_id
             )
         
         # Set clients for RAG service if not already set
@@ -58,17 +64,24 @@ async def query_endpoint(request: QueryRequest):
         }
         rag_service.set_clients(settings.groq_client, college_config)
         
+
+        
         # Process the query
-        async for result in rag_service.query_stream(request.message, request.session_id):
+        logger.info(f"[{session_id}] Processing query via RAGService...")
+        async for result in rag_service.query_stream(query_data.message, query_data.session_id):
             if result["type"] == "answer":
                 # Return the generated answer
                 answer = result.get("answer", f"I don't have that information. Please contact {settings.college_name} Admissions at {settings.admissions_phone}")
                 sources = [doc["document"] for doc in result.get("documents", [])[:3]]  # Top 3
-                session_id = request.session_id or "default"
+                session_id = query_data.session_id or "default"
                 
                 # Cache the response for future queries
-                rag_service.response_cache.set(request.message, answer)
+                # rag_service.response_cache.set(query_data.message, answer) <-- Removed (handled in RAGService)
                 
+
+                
+                elapsed = time.time() - start_time
+                logger.info(f"[{session_id}] Query processed in {elapsed:.2f}s")
                 return QueryResponse(
                     answer=answer,
                     sources=sources,
@@ -79,31 +92,30 @@ async def query_endpoint(request: QueryRequest):
                 return QueryResponse(
                     answer="I'm having trouble processing your request. Please try again.",
                     sources=[],
-                    session_id=request.session_id or "default"
+                    session_id=query_data.session_id or "default"
                 )
         
         # Fallback response
         return QueryResponse(
             answer="I'm having trouble processing your request. Please try again.",
             sources=[],
-            session_id=request.session_id or "default"
+            session_id=query_data.session_id or "default"
         )
     except Exception as e:
         logger.error(f"Error processing query: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/tts")
-async def tts_endpoint(request: TTSRequest):
+@limiter.limit("20/minute")
+async def tts_endpoint(tts_data: TTSRequest, request: Request):
     """Convert text to speech"""
     try:
         # Use default voice if none provided
-        voice_id = request.voice_id or settings.elevenlabs_voice_id
-        
-        audio_content = await tts_service.text_to_speech(request.text, voice_id)
+        audio_content = await tts_service.text_to_speech(tts_data.text)
         
         # Save to temporary file and return path
-        session_id = request.session_id or "default"
-        filename = f"tts_{session_id}_{hash(request.text)}.mp3"
+        session_id = tts_data.session_id or "default"
+        filename = f"tts_{session_id}_{hash(tts_data.text)}.mp3"
         filepath = os.path.join(settings.temp_audio_dir, filename)
         
         os.makedirs(settings.temp_audio_dir, exist_ok=True)
@@ -170,6 +182,16 @@ async def submit_feedback(feedback: FeedbackRequest):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     
+    # Check if Groq client is available
+    if not settings.groq_client:
+        error_msg = f"I'm having trouble connecting to the AI service. Please make sure your GROQ_API_KEY is set in the environment."
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "message": error_msg
+        }))
+        await websocket.close()
+        return
+    
     # Set clients for RAG service
     college_config = {
         'name': settings.college_name,
@@ -208,8 +230,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             answer = result["answer"]
                             
                             # Convert to speech
-                            voice_id = settings.elevenlabs_voice_id
-                            audio_content = await tts_service.text_to_speech(answer, voice_id)
+                            audio_content = await tts_service.text_to_speech(answer)
                             
                             # Send answer to client
                             await websocket.send_text(json.dumps({
